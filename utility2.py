@@ -1,15 +1,13 @@
 """
-Dobot Magician Coordinate System Manager + Movement Functions
-=============================================================
+utility2.py
 
-Sistem koordinat Dobot Magician dengan karakteristik khusus:
-- Sumbu X: TETAP (depan-belakang)
-- Sumbu Y: RELATIF terhadap home calibration (kiri-kanan)
-- Sumbu Z: Ketinggian (vertikal)
-
-Drop Zone: Papan catur 4x2 (4 baris × 2 kolom = 8 titik)
-- X: 2 posisi [51 (ujung A), -16 (ujung B)]
-- Y: 4 posisi dengan spacing 20mm
+Dobot Magician Coordinate System Manager + Unified Sequence Functions
+=====================================================================
+Sistem koordinat Dobot Magician untuk Papan Catur 4x4 (Matriks 16 Titik)
+- Sisi setiap box/grid: 20 mm (2 cm)
+- Sumbu X: Jarak depan-belakang (Kolom 1 & 2 di X=51 mm, Kolom 3 & 4 di X=-16 mm)
+- Sumbu Y: Jarak kiri-kanan dengan spacing presisi 20 mm sesuai ukuran box (-30, -10, +10, +30)
+- Sumbu Z: Ketinggian vertikal
 """
 
 from pydobotplus import Dobot, CustomPosition
@@ -17,66 +15,52 @@ from time import sleep
 from enum import Enum
 
 class PositionType(Enum):
-    """Tipe posisi dalam sistem"""
-    HOME = "home"           # Posisi calibration (0,0,0)
-    STANDBY = "standby"     # Posisi siaga sebelum pick
-    GRID = "grid"           # Grid position di papan catur
+    HOME = "home"
+    STANDBY = "standby"
+    GRID = "grid"
+
+# ============================================================
+# KONSTANTA SISTEM GLOBAL
+# ============================================================
+# Poin 1: Posisi IDLE Kustom saat mesin baru aktif atau setelah eksekusi perintah
+# X = 173.8, Y = 0.0 (Relatif awal), Z = 47.4
+POSISI_IDLE = CustomPosition(x=173.8, y=0.0, z=47.4, r=0.0)
+
+# Posisi pengambilan benda (Pick Up) di atas Conveyor Belt
+POSISI_PICK_CONVEYOR = CustomPosition(x=173.8, y=3.45, z=9.44, r=20.7)
+
 
 class CoordinateSystem:
-    """Manager untuk sistem koordinat arm Dobot Magician"""
+    """Manager hitungan sistem koordinat papan matriks 4x4"""
     
     def __init__(self):
-        """
-        Inisialisasi coordinate system dengan grid 4x4:
-        - Format: (col, row) dimana col=1-4, row=1-4
-        - Total 16 titik
-        - X: 2 posisi [51 (kolom 1,2), -16 (kolom 3,4)]
-        - Y: 4 posisi dengan spacing 20mm
-        """
+        # Sumbu X (Tetap berdasarkan pembagian kelompok kolom)
+        self.X_HOME = 0
+        self.X_STANDBY = 171.8
         
-        # ==========================================
-        # KONSTANTA SISTEM KOORDINAT
-        # ==========================================
-        
-        # Sumbu X (Depan-Belakang, TETAP)
-        self.X_HOME = 0                    # Home/calibration point
-        self.X_STANDBY = 171.8             # Posisi siaga pick up
-        
-        # Drop Zone X positions (berdasarkan kolom)
-        # Kolom 1,2 -> X=51 (ujung A)
-        # Kolom 3,4 -> X=-16 (ujung B)
+        # Pemetaan Sumbu X berdasarkan nomor Kolom (1-indexed)
         self.X_BY_COL = {
             1: 51, 2: 51,
             3: -16, 4: -16
         }
         
-        # Sumbu Y (Kiri-Kanan, RELATIF terhadap HOME)
-        self.Y_MAX_REACH = 310             # Jangkauan maksimal arm (mm)
-        self.Y_CENTER = 0                  # Center adalah home reference
-        
-        # Drop Zone Y positions (berdasarkan row) - spacing 20mm
-        # Row 1 -> Y=-30
-        # Row 2 -> Y=-10
-        # Row 3 -> Y=+10
-        # Row 4 -> Y=+30
+        # Pemetaan Sumbu Y berdasarkan nomor Baris/Row (1-indexed) dengan Spacing 20mm (2cm)
         self.Y_BY_ROW = {
             1: -30,
             2: -10,
-            3: +10,
-            4: +30
+            3: 10,
+            4: 30
         }
         
-        # ==========================================
-        # GRID MAPPING (4x4 = 16 titik)
-        # ==========================================
-        """
-        Grid layout (1-indexed, format: (col, row)):
-        (1,1) (2,1) (3,1) (4,1)
-        (1,2) (2,2) (3,2) (4,2)
-        (1,3) (2,3) (3,3) (4,3)
-        (1,4) (2,4) (3,4) (4,4)
-        """
+        # Generator Otomatis Matriks Koordinat Grid 4x4 (16 Titik)
         self.grid_positions = {}
+        self._calculate_all_grids()
+        
+        self.home_position = None
+        self.is_calibrated = False
+
+    def _calculate_all_grids(self):
+        """Menghitung dan memetakan koordinat X, Y untuk setiap kombinasi grid (col, row)"""
         for col in range(1, 5):
             for row in range(1, 5):
                 grid_id = (col, row)
@@ -85,213 +69,150 @@ class CoordinateSystem:
                     "row": row,
                     "x": self.X_BY_COL[col],
                     "y": self.Y_BY_ROW[row],
-                    "label": f"({col},{row})"
+                    "label": f"Grid ({col},{row})"
                 }
-        
-        # Store home position setelah calibration
-        self.home_position = None
-        self.is_calibrated = False
 
     def calibrate(self, home_position):
-        """
-        Simpan home position setelah arm di-home.
-        
-        Args:
-            home_position: CustomPosition dari arm setelah home (seharusnya 0,0,0)
-        """
+        """Menandai bahwa sistem koordinat mekanis robot telah siap digunakan"""
         self.home_position = home_position
         self.is_calibrated = True
-        
-        print(f"[CALIBRATION] Home position: X={home_position.x}, Y={home_position.y}, Z={home_position.z}")
-        print(f"[CALIBRATION] Sistem koordinat siap digunakan.")
+        print(f"[CALIBRATION] Dobot Calibrated. Home Reference: X={home_position.x}, Y={home_position.y}")
         return True
 
-    def get_standby_position(self, z=9.44, r=20.7):
-        """
-        Dapatkan posisi standby (siap pick).
-        
-        Returns:
-            CustomPosition untuk posisi siaga
-        """
-        if not self.is_calibrated:
-            raise RuntimeError("System belum dikalibrasi! Jalankan home dulu.")
-        
-        return CustomPosition(
-            x=self.X_STANDBY,
-            y=self.Y_CENTER,  # Kembali ke center (home Y reference)
-            z=z,
-            r=r
-        )
-
     def get_grid_position(self, col, row, z=-10, r=100):
-        """
-        Dapatkan posisi di grid papan catur.
-        
-        Args:
-            col: Kolom (1-4)
-            row: Baris (1-4)
-            z: Ketinggian drop (default -10)
-            r: Rotasi gripper (default 100)
-            
-        Returns:
-            CustomPosition untuk grid tertentu
-        """
+        """Mengambil data koordinat spesifik hasil kalkulasi grid matriks"""
         if not self.is_calibrated:
-            raise RuntimeError("System belum dikalibrasi! Jalankan home dulu.")
-        
-        if col < 1 or col > 4 or row < 1 or row > 4:
-            raise ValueError(f"Grid ({col}, {row}) tidak valid. Gunakan col,row dalam range 1-4.")
+            raise RuntimeError("Sistem belum dikalibrasi! Jalankan home terlebih dahulu.")
         
         grid_key = (col, row)
         if grid_key not in self.grid_positions:
-            raise ValueError(f"Grid {grid_key} tidak ditemukan.")
+            raise ValueError(f"Koordinat grid ({col},{row}) di luar jangkauan matriks 4x4!")
         
         pos = self.grid_positions[grid_key]
+        print(f"[KONTROL] Ambil Target {pos['label']} -> X: {pos['x']} mm, Y: {pos['y']} mm")
         
-        print(f"[DROP] Grid ({col},{row}): X={pos['x']}, Y={pos['y']}")
-        
-        return CustomPosition(
-            x=pos["x"],
-            y=pos["y"],
-            z=z,
-            r=r
-        )
-
-    def get_all_grid_positions(self):
-        """Return semua posisi grid dalam format dict"""
-        result = {}
-        for grid_id in self.grid_positions.keys():
-            result[grid_id] = self.get_grid_position(grid_id)
-        return result
-
-    def print_system_info(self):
-        """Print informasi sistem koordinat untuk debug"""
-        print("\n" + "="*60)
-        print("DOBOT MAGICIAN COORDINATE SYSTEM INFO")
-        print("="*60)
-        print(f"\n📍 GRID 4x4 (1-indexed):")
-        print(f"   Format: (col, row) dimana col=1-4, row=1-4")
-        
-        print(f"\n📍 SUMBU X (Depan-Belakang, TETAP):")
-        print(f"   Home/Center:     X = {self.X_HOME} mm")
-        print(f"   Posisi Standby:  X = {self.X_STANDBY} mm")
-        print(f"   Kolom 1,2:       X = 51 mm")
-        print(f"   Kolom 3,4:       X = -16 mm")
-        
-        print(f"\n📍 SUMBU Y (Kiri-Kanan, RELATIF ke HOME):")
-        print(f"   Center (Home Ref): Y = {self.Y_CENTER} mm")
-        print(f"   Max Reach:        Y = ±{self.Y_MAX_REACH} mm")
-        print(f"   Row 1:            Y = -30 mm")
-        print(f"   Row 2:            Y = -10 mm")
-        print(f"   Row 3:            Y = +10 mm")
-        print(f"   Row 4:            Y = +30 mm")
-        
-        print(f"\n📍 GRID POSITIONS (4x4 = 16 titik):")
-        for row in range(1, 5):
-            row_str = ""
-            for col in range(1, 5):
-                pos = self.grid_positions[(col, row)]
-                row_str += f"({col},{row}):({pos['x']:3},{pos['y']:3})  "
-            print(f"   Row {row}: {row_str}")
-        
-        print(f"\n✓ Status Kalibrasi: {'SIAP' if self.is_calibrated else 'BELUM - Jalankan home dulu!'}")
-        print("="*60 + "\n")
+        return CustomPosition(x=pos["x"], y=pos["y"], z=z, r=r)
 
 
-# ==========================================
-# ROBOT MOVEMENT FUNCTIONS (Unified)
-# ==========================================
+# ============================================================
+# FUNGSI PERGERAKAN MANDIRI (LOW LEVEL MOVEMENT)
+# ============================================================
 
-def ke_posisi_awal(device: Dobot):
-    """Pindah ke posisi siaga (standby)"""
-    print("move to preparation position..")
-    posisi_awal = CustomPosition(173.8, 3.45, 9.44, 20.7)
-    device.move_to(x=posisi_awal.x, y=posisi_awal.y, z=posisi_awal.z, r=posisi_awal.r, wait=True)
+def ke_posisi_idle(device: Dobot):
+    """Langkah 1 & 6: Mengembalikan arm robot ke titik aman/idle kustom secara software"""
+    print(f"[ROBOT] Pindah ke Posisi Idle -> X: {POSISI_IDLE.x}, Y: {POSISI_IDLE.y}, Z: {POSISI_IDLE.z}")
+    device.move_to(x=POSISI_IDLE.x, y=POSISI_IDLE.y, z=POSISI_IDLE.z, r=POSISI_IDLE.r, wait=True)
 
 
 def pick_payload(device: Dobot, position: CustomPosition):
-    """Pick payload dari posisi tertentu"""
-    print("pick payload..")
-    ke_posisi_awal(device)
+    """Langkah 4: Mekanisme turun, mengaktifkan gripper/suction, dan mengangkat benda"""
+    print("[ROBOT] Memulai sekuens picking di conveyor...")
+    # Menuju ke posisi bersiap di atas conveyor
+    device.move_to(x=position.x, y=position.y, z=position.z, r=position.r, wait=True)
+    sleep(1)
+    
+    # Arm turun mendekati box (Z dikompensasi 20mm ke bawah untuk menjangkau permukaan objek)
+    device.move_to(x=position.x, y=position.y, z=position.z - 20, r=position.r, wait=True)
+    sleep(1.5)
+    
+    # Menjepit/mencengkeram benda (Sesuaikan parameter pneumatik/gripper pada hardware Anda)
+    print("[ROBOT] Gripper/Suction Cup AKTIF.")
+    device.grip(enable=False) 
     sleep(2)
-    device.move_to(x=position.x, y=position.y, z=position.z-20, r=position.r, wait=True)
-    sleep(3)
-    device.grip(enable=False)
-    sleep(3)
-    ke_posisi_awal(device)
+    
+    # Mengangkat kembali arm ke ketinggian aman standby conveyor
+    device.move_to(x=position.x, y=position.y, z=position.z, r=position.r, wait=True)
 
 
 def place_payload(device: Dobot, position: CustomPosition):
-    """Place payload ke posisi tertentu"""
-    print("place payload..")
-    sleep(2)
-    device.move_to(x=position.x, y=position.y, z=position.z+90, r=position.r, wait=True)
-    sleep(3)
-    device.move_to(x=position.x, y=position.y, z=position.z, r=position.r, wait=True)
-    device.grip(enable=True)
-    sleep(3)
-    device.move_to(x=position.x, y=position.y, z=position.z+120, r=position.r, wait=True)
-
-
-def execute_drop(device: Dobot, col: int, row: int, coord_system: CoordinateSystem):
-    """
-    Unified function untuk drop di grid tertentu
+    """Langkah 5: Membawa benda di atas titik drop, turun, melepaskan, dan naik kembali"""
+    print("[ROBOT] Memulai sekuens placing ke area grid...")
+    sleep(1)
     
-    Args:
-        device: Dobot device
-        col: Kolom grid (1-4)
-        row: Baris grid (1-4)
-        coord_system: CoordinateSystem instance
+    # Berada di atas koordinat grid sasaran (Z dinaikkan +90mm agar tidak menabrak susunan lain)
+    device.move_to(x=position.x, y=position.y, z=position.z + 90, r=position.r, wait=True)
+    sleep(1.5)
+    
+    # Lengan turun ke koordinat Z drop target asli
+    device.move_to(x=position.x, y=position.y, z=position.z, r=position.r, wait=True)
+    sleep(1)
+    
+    # Melepaskan cengkeraman benda
+    print("[ROBOT] Gripper/Suction Cup NON-AKTIF (Benda diletakkan).")
+    device.grip(enable=True)
+    sleep(2)
+    
+    # Arm naik menjauh ke atas (+120mm) sebelum bergeser kembali ke idle
+    device.move_to(x=position.x, y=position.y, z=position.z + 120, r=position.r, wait=True)
+
+
+# ============================================================
+# ALUR WORKFLOW UTAMA (HIGH LEVEL SEQUENCE 1-6)
+# ============================================================
+
+def kontrol_conveyor(device: Dobot, status="jalan"):
+    """Langkah 2: Mengatur kondisi pergerakan hardware Conveyor Belt"""
+    if status == "jalan":
+        print("[CONVEYOR] Motor Aktif -> Mengalirkan box menuju area jangkauan...")
+        # Integrasikan perintah IO/Conveyor pydobotplus Anda di sini seandainya ada, misal:
+        # device.conveyor(speed=10000)
+    else:
+        print("[CONVEYOR] Motor Mati -> Box dikunci di titik deteksi.")
+        # device.conveyor(speed=0)
+
+
+def amati_kamera_placeholder():
+    """Langkah 3: Tempat penampungan logika deteksi warna (Computer Vision)"""
+    print("[VISION] Menunggu konfirmasi visual dari kamera...")
+    sleep(2)  # Simulasi jeda waktu tunggu pemrosesan gambar
+    
+    # Sementara mengembalikan True otomatis agar sekuens dapat berlanjut ke tahap pengantaran
+    return True
+
+
+def execute_full_sequence(device: Dobot, col: int, row: int, coord_system: CoordinateSystem):
+    """
+    Eksekutor urutan kerja otomatis terintegrasi (Poin 1 hingga 6)
     """
     if not coord_system.is_calibrated:
-        raise RuntimeError("Coordinate system belum dikalibrasi!")
-    
-    print(f"\n[EXECUTE] Bergerak ke Grid ({col},{row})")
-    
-    drop_pos = coord_system.get_grid_position(col, row)
-    pick_payload(device, CustomPosition(173.8, 3.45, 9.44, 20.7))
-    sleep(2)
-    place_payload(device, drop_pos)
-    sleep(2)
-    ke_posisi_awal(device)
-    
-    print(f"[EXECUTE] Grid ({col},{row}) selesai")
+        raise RuntimeError("Gagal menjalankan sekuens! Sistem koordinat belum siap.")
 
+    print(f"\n========================================================")
+    print(f"RUNNING SEQUENCE: TARGET MATCHING -> GRID CELL ({col}, {row})")
+    print(f"========================================================")
 
-# Backward compatibility functions (deprecated tapi tetap ada untuk compatibility)
-def posisiA(device):
-    """Legacy function - gunakan execute_drop() untuk lebih fleksibel"""
-    print("[DEPRECATED] posisiA() - gunakan execute_drop(device, 'A1', coord_system)")
-    pick_payload(device, CustomPosition(173.8, 3.45, 9.44, 20.7))
-    place_payload(device, CustomPosition(14.68, 24.7, -22.05, 100))
-    ke_posisi_awal(device)
+    # 1. Menuju ke posisi Idle awal kustom secara software
+    ke_posisi_idle(device)
+    sleep(1)
 
-def posisiB(device):
-    """Legacy function - gunakan execute_drop() untuk lebih fleksibel"""
-    print("[DEPRECATED] posisiB() - gunakan execute_drop(device, 'B1', coord_system)")
-    pick_payload(device, CustomPosition(173.8, 3.45, 9.44, 20.7))
-    place_payload(device, CustomPosition(-29.064, 204.89, -18.74, 100))
-    ke_posisi_awal(device)
+    # 2. Conveyor belt bergerak mencari objek baru
+    kontrol_conveyor(device, status="jalan")
 
-def posisiC(device):
-    """Legacy function - gunakan execute_drop() untuk lebih fleksibel"""
-    print("[DEPRECATED] posisiC() - gunakan execute_drop(device, 'B2', coord_system)")
-    pick_payload(device, CustomPosition(173.8, 3.45, 9.44, 20.7))
-    place_payload(device, CustomPosition(-21.72, 253.6, -17.82, 100))
-    ke_posisi_awal(device)
+    # 3. Kamera menganalisis warna box hingga objek valid berhenti tepat di depan sensor
+    box_terkonfirmasi = amati_kamera_placeholder()
 
-def posisiD(device):
-    """Legacy function - gunakan execute_drop() untuk lebih fleksibel"""
-    print("[DEPRECATED] posisiD() - gunakan execute_drop(device, 'B4', coord_system)")
-    pick_payload(device, CustomPosition(173.8, 3.45, 9.44, 20.7))
-    place_payload(device, CustomPosition(-22.95, 254.08, -17.25, 100))
-    ke_posisi_awal(device)
+    if box_terkonfirmasi:
+        # Hentikan aliran conveyor segera setelah kamera/sensor mendeteksi box masuk
+        kontrol_conveyor(device, status="berhenti")
+        sleep(0.5)
 
+        # 4. Lengan robot bergerak mengambil box di atas conveyor belt
+        pick_payload(device, POSISI_PICK_CONVEYOR)
+        sleep(1)
 
-# ==========================================
-# HELPER FUNCTIONS
-# ==========================================
+        # 5. Mengangkat dan memindahkan benda ke titik dropdown matriks papan catur pilihan GUI
+        drop_target_coordinates = coord_system.get_grid_position(col, row)
+        place_payload(device, drop_target_coordinates)
+        sleep(1)
 
-def create_coordinate_system():
-    """Factory function untuk create coordinate system"""
-    return CoordinateSystem()
+        # 6. Naik kembali dan pulang mengunci posisi di koordinat Idle awal
+        ke_posisi_idle(device)
+        
+        print(f"\n[SUKSES] Misi penataan Box pada Grid ({col}, {row}) Berhasil diselesaikan!")
+        print(f"========================================================\n")
+        return True
+    else:
+        print("[GAGAL] Kamera tidak menemukan box yang sesuai. Menghentikan conveyor demi keamanan.")
+        kontrol_conveyor(device, status="berhenti")
+        ke_posisi_idle(device)
+        return False
